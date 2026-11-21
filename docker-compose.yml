@@ -1,0 +1,35 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: pipeline-api:day5
+    ports:
+      - "8000:8000"
+    environment:
+      QUEUE_DIR: /app/queue
+      STORAGE_DIR: /app/storage
+    volumes:
+      - ./queue:/app/queue
+      - ./storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: pipeline-worker:day5
+    environment:
+      QUEUE_DIR: /app/queue
+      STORAGE_DIR: /app/storage
+    volumes:
+      - ./queue:/app/queue
+      - ./storage:/app/storage
+    depends_on:
+      api:
+        condition: service_healthy
