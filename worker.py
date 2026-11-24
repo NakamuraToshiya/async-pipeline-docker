@@ -1,12 +1,14 @@
 import json
+import os
 import random
 import re
 import time
-from pathlib import Path
 
-import os
-QUEUE_DIR = Path(os.environ.get("QUEUE_DIR", str(Path.home() / "day4-pipeline" / "queue")))
-STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", str(Path.home() / "day4-pipeline" / "storage")))
+import boto3
+
+SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
+S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "")
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
 
 
 def mask_pii(text: str) -> str:
@@ -29,41 +31,56 @@ def process_job(job: dict) -> dict:
     }
 
 
-def save_result(job_id: str, payload: dict) -> None:
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    out_file = STORAGE_DIR / f"{job_id}.json"
-    out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_result_to_s3(s3_client, job_id: str, payload: dict) -> str:
+    key = f"results/{job_id}.json"
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=key,
+        Body=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        ContentType="application/json; charset=utf-8",
+    )
+    return key
 
 
-def run_worker(poll_interval: float = 1.0) -> None:
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    print("Day 4 Worker started. Watching queue...")
+def run_worker(wait_time_seconds: int = 10, idle_sleep: float = 1.0) -> None:
+    if not SQS_QUEUE_URL:
+        raise RuntimeError("SQS_QUEUE_URL environment variable is not set")
+    if not S3_BUCKET_NAME:
+        raise RuntimeError("S3_BUCKET_NAME environment variable is not set")
+
+    sqs = boto3.client("sqs", region_name=AWS_REGION)
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    print(f"Worker started. Polling SQS: {SQS_QUEUE_URL}, Bucket: {S3_BUCKET_NAME}")
 
     while True:
-        job_files = sorted(QUEUE_DIR.glob("*.json"))
-        if job_files:
-            job_file = job_files[0]
+        resp = sqs.receive_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=wait_time_seconds,
+        )
+        messages = resp.get("Messages", [])
+        if not messages:
+            time.sleep(idle_sleep)
+            continue
+
+        for msg in messages:
+            receipt_handle = msg["ReceiptHandle"]
+            body_raw = msg.get("Body", "{}")
             try:
-                job = json.loads(job_file.read_text(encoding="utf-8"))
-                job_id = job.get("job_id", job_file.stem)
-                print(f"[INFO] Picked up {job_id}")
+                job = json.loads(body_raw)
+                job_id = job.get("job_id", "unknown")
+                print(f"[INFO] Picked up job_id={job_id}")
+
                 result = process_job(job)
-                save_result(job_id, result)
-                job_file.unlink()
-                print(f"[SUCCESS] Saved to storage: {job_id}")
+                s3_key = save_result_to_s3(s3, job_id, result)
+
+                sqs.delete_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    ReceiptHandle=receipt_handle,
+                )
+                print(f"[SUCCESS] Saved s3://{S3_BUCKET_NAME}/{s3_key} and deleted SQS message")
             except Exception as exc:
-                job_id = job_file.stem
-                error_result = {
-                    "job_id": job_id,
-                    "status": "failed",
-                    "error": str(exc),
-                }
-                save_result(job_id, error_result)
-                job_file.unlink()
-                print(f"[ERROR] {job_id} failed ({exc}). Saved error to storage.")
-        else:
-            time.sleep(poll_interval)
+                print(f"[ERROR] Failed processing message: {exc}")
 
 
 if __name__ == "__main__":

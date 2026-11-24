@@ -1,0 +1,60 @@
+name: CD
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ap-northeast-1
+      ECR_REGISTRY: 766282146484.dkr.ecr.ap-northeast-1.amazonaws.com
+      ECS_CLUSTER: pipeline-cluster
+      API_REPO: pipeline-api
+      WORKER_REPO: pipeline-worker
+      API_SERVICE: pipeline-api-service
+      WORKER_SERVICE: pipeline-worker-service
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push API image
+        run: |
+          docker build -f Dockerfile.api -t $ECR_REGISTRY/$API_REPO:${{ github.sha }} -t $ECR_REGISTRY/$API_REPO:latest .
+          docker push $ECR_REGISTRY/$API_REPO:${{ github.sha }}
+          docker push $ECR_REGISTRY/$API_REPO:latest
+
+      - name: Build and push Worker image
+        run: |
+          docker build -f Dockerfile.worker -t $ECR_REGISTRY/$WORKER_REPO:${{ github.sha }} -t $ECR_REGISTRY/$WORKER_REPO:latest .
+          docker push $ECR_REGISTRY/$WORKER_REPO:${{ github.sha }}
+          docker push $ECR_REGISTRY/$WORKER_REPO:latest
+
+      - name: Update ECS services
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $API_SERVICE \
+            --force-new-deployment \
+            --region $AWS_REGION > /dev/null
+
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $WORKER_SERVICE \
+            --force-new-deployment \
+            --region $AWS_REGION > /dev/null

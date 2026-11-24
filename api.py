@@ -1,33 +1,50 @@
 import json
+import os
 import uuid
-from pathlib import Path
 
-from fastapi import FastAPI
+import boto3
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-import os
-QUEUE_DIR = Path(os.environ.get("QUEUE_DIR", str(Path.home() / "day4-pipeline" / "queue")))
+SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
 
-app = FastAPI(title="Day 4 Pipeline API")
+app = FastAPI(title="Pipeline API (SQS/S3)")
+
+
+def get_sqs_client():
+    if not SQS_QUEUE_URL:
+        raise RuntimeError("SQS_QUEUE_URL environment variable is not set")
+    return boto3.client("sqs", region_name=AWS_REGION)
 
 
 class JobRequest(BaseModel):
     text: str
 
 
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
 @app.post("/jobs")
 def create_job(req: JobRequest) -> dict:
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     job_id = str(uuid.uuid4())
     job_data = {
         "job_id": job_id,
         "text": req.text,
     }
-    job_file = QUEUE_DIR / f"{job_id}.json"
-    job_file.write_text(json.dumps(job_data, ensure_ascii=False), encoding="utf-8")
+    try:
+        sqs = get_sqs_client()
+        resp = sqs.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=json.dumps(job_data, ensure_ascii=False),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {exc}") from exc
 
-    queued_count = len(list(QUEUE_DIR.glob("*.json")))
     return {
         "job_id": job_id,
-        "queue_size": queued_count,
+        "message_id": resp.get("MessageId"),
+        "status": "queued",
     }

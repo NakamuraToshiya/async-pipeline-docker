@@ -1,5 +1,3 @@
-import json
-import random
 from fastapi.testclient import TestClient
 
 import api
@@ -7,44 +5,46 @@ import worker
 
 
 def test_mask_pii():
-    text = "Contact me at test@example.com or 090-1234-5678."
-    masked = worker.mask_pii(text)
+    raw = "Contact me at test.user@example.com or 090-1234-5678."
+    masked = worker.mask_pii(raw)
     assert "[EMAIL]" in masked
     assert "[PHONE]" in masked
-    assert "test@example.com" not in masked
+    assert "test.user@example.com" not in masked
     assert "090-1234-5678" not in masked
 
 
-def test_process_job_success():
-    random.seed(42)
-    job = {"job_id": "job-123", "text": "User: alice@example.com, Tel: 03-1234-5678"}
-    result = worker.process_job(job)
-    assert result["job_id"] == "job-123"
-    assert result["status"] == "completed"
-    assert result["masked_text"] == "User: [EMAIL], Tel: [PHONE]"
+def test_process_job_success(monkeypatch):
+    monkeypatch.setattr(worker.random, "random", lambda: 0.9)
+    res = worker.process_job({"job_id": "job-1", "text": "hello 03-1234-5678"})
+    assert res["job_id"] == "job-1"
+    assert res["status"] == "completed"
+    assert "[PHONE]" in res["masked_text"]
 
 
 def test_process_job_error_sim():
-    job = {"job_id": "job-err", "text": "trigger ERROR_SIM please"}
     try:
-        worker.process_job(job)
-        assert False, "Expected RuntimeError for ERROR_SIM"
-    except RuntimeError:
-        assert True
+        worker.process_job({"job_id": "job-err", "text": "ERROR_SIM test"})
+        assert False, "Expected RuntimeError"
+    except RuntimeError as exc:
+        assert "job-err" in str(exc)
 
 
-def test_create_job_endpoint(tmp_path, monkeypatch):
-    queue_dir = tmp_path / "queue"
-    monkeypatch.setattr(api, "QUEUE_DIR", queue_dir)
+def test_create_job_endpoint(monkeypatch):
+    sent_messages = []
+
+    class DummySQSClient:
+        def send_message(self, QueueUrl, MessageBody):
+            sent_messages.append({"QueueUrl": QueueUrl, "MessageBody": MessageBody})
+            return {"MessageId": "msg-12345"}
+
+    monkeypatch.setattr(api, "SQS_QUEUE_URL", "https://sqs.ap-northeast-1.amazonaws.com/766282146484/pipeline-job-queue")
+    monkeypatch.setattr(api.boto3, "client", lambda service_name, region_name=None: DummySQSClient())
 
     client = TestClient(api.app)
-    res = client.post("/jobs", json={"text": "hello 090-1111-2222"})
-    assert res.status_code == 200
-    body = res.json()
+    resp = client.post("/jobs", json={"text": "hello world"})
+    assert resp.status_code == 200
+    body = resp.json()
     assert "job_id" in body
-    assert body["queue_size"] == 1
-
-    saved_file = queue_dir / f"{body['job_id']}.json"
-    assert saved_file.exists()
-    saved_data = json.loads(saved_file.read_text(encoding="utf-8"))
-    assert saved_data["text"] == "hello 090-1111-2222"
+    assert body["message_id"] == "msg-12345"
+    assert len(sent_messages) == 1
+    assert "hello world" in sent_messages[0]["MessageBody"]
