@@ -1,5 +1,6 @@
-import os
+from datetime import datetime, timezone
 import json
+import os
 import random
 import re
 import time
@@ -9,6 +10,18 @@ import boto3
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
+SERVICE_NAME = "worker"
+
+
+def log_json(level: str, message: str, **fields) -> None:
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "service": SERVICE_NAME,
+        "message": message,
+        **fields,
+    }
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def mask_pii(text: str) -> str:
@@ -50,7 +63,12 @@ def run_worker(wait_time_seconds: int = 10, idle_sleep: float = 1.0) -> None:
 
     sqs = boto3.client("sqs", region_name=AWS_REGION)
     s3 = boto3.client("s3", region_name=AWS_REGION)
-    print(f"Worker started. Polling SQS: {SQS_QUEUE_URL}, Bucket: {S3_BUCKET_NAME}")
+    log_json(
+        "INFO",
+        "Worker started",
+        sqs_queue_url=SQS_QUEUE_URL,
+        s3_bucket=S3_BUCKET_NAME,
+    )
 
     while True:
         resp = sqs.receive_message(
@@ -66,10 +84,11 @@ def run_worker(wait_time_seconds: int = 10, idle_sleep: float = 1.0) -> None:
         for msg in messages:
             receipt_handle = msg["ReceiptHandle"]
             body_raw = msg.get("Body", "{}")
+            job_id = "unknown"
             try:
                 job = json.loads(body_raw)
                 job_id = job.get("job_id", "unknown")
-                print(f"[INFO] Picked up job_id={job_id}")
+                log_json("INFO", "Picked up job", job_id=job_id)
 
                 result = process_job(job)
                 s3_key = save_result_to_s3(s3, job_id, result)
@@ -78,13 +97,25 @@ def run_worker(wait_time_seconds: int = 10, idle_sleep: float = 1.0) -> None:
                     QueueUrl=SQS_QUEUE_URL,
                     ReceiptHandle=receipt_handle,
                 )
-                print(f"[SUCCESS] Saved s3://{S3_BUCKET_NAME}/{s3_key} and deleted SQS message")
+                log_json(
+                    "INFO",
+                    "Saved result and deleted SQS message",
+                    job_id=job_id,
+                    s3_bucket=S3_BUCKET_NAME,
+                    s3_key=s3_key,
+                )
             except Exception as exc:
-                print(f"[ERROR] Failed processing message: {exc}")
+                log_json(
+                    "ERROR",
+                    "Failed processing message",
+                    job_id=job_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
 
 if __name__ == "__main__":
     try:
         run_worker()
     except KeyboardInterrupt:
-        print("\nWorker stopped.")
+        log_json("INFO", "Worker stopped")

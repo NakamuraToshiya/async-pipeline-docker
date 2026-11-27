@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import os
 import uuid
@@ -8,8 +9,20 @@ from pydantic import BaseModel
 
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-1"
+SERVICE_NAME = "api"
 
 app = FastAPI(title="Pipeline API (SQS/S3)")
+
+
+def log_json(level: str, message: str, **fields) -> None:
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "service": SERVICE_NAME,
+        "message": message,
+        **fields,
+    }
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def get_sqs_client():
@@ -41,10 +54,26 @@ def create_job(req: JobRequest) -> dict:
             MessageBody=json.dumps(job_data, ensure_ascii=False),
         )
     except Exception as exc:
+        log_json(
+            "ERROR",
+            "Failed to enqueue job",
+            job_id=job_id,
+            status_code=500,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {exc}") from exc
 
+    message_id = resp.get("MessageId")
+    log_json(
+        "INFO",
+        "Job enqueued to SQS",
+        job_id=job_id,
+        message_id=message_id,
+        status="queued",
+    )
     return {
         "job_id": job_id,
-        "message_id": resp.get("MessageId"),
+        "message_id": message_id,
         "status": "queued",
     }
