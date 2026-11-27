@@ -50,11 +50,13 @@ jobs:
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $API_SERVICE \
+            --desired-count 1 \
             --force-new-deployment \
             --region $AWS_REGION > /dev/null
 
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $WORKER_SERVICE \
+            --desired-count 1 \
             --force-new-deployment \
             --region $AWS_REGION > /dev/null
